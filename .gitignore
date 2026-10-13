@@ -3,3 +3,4 @@ data_live/
 signals.csv
 scan.log
 __pycache__/
+trades.csv

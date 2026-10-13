@@ -1,6 +1,7 @@
 # Binance 山寨永續・只做多・點火突破策略 v2
 
-> 狀態聲明（先講實話）：這份 v2 是**待驗證的假設**，不是已證明的優勢。沙箱連不到 Binance，所以我沒有真實回測數字。
+> 狀態聲明（先講實話）：目前**沒有任何實戰或回測數據**（grok 只報單、沒有代操作、實際勝負也未回報），所以 §1 的診斷是從規則文字推論的假設，不是證據。優先順序：①用 `journal.py` 記錄實戰 ②跑 `backtest.py` ③才調規則。
+> 這份 v2 是**待驗證的假設**，不是已證明的優勢。沙箱連不到 Binance，所以我沒有真實回測數字。
 > `backtest.py` 對人造數據只驗證了引擎邏輯；真實對比請在能連網的機器跑 `python3 backtest.py --days 120`。
 
 ## 1. 現行規則（v1）的問題診斷
@@ -72,6 +73,15 @@
 ```
 1 * * * * cd /path/cryptotrader && TG_TOKEN=xxx TG_CHAT=yyy python3 scan.py --equity 20000 >> scan.log 2>&1
 ```
+
+## 3.5 交易日誌（讓實戰結果進得來）
+```
+python3 journal.py open SOLUSDT --entry 142.5 --stop 138.2 --risk 100 --tier A
+python3 journal.py close 1 --exit 150.3 --frac 0.33   # 分批出場
+python3 journal.py skip WIFUSDT --note "報單說做，我沒做，因為…"
+python3 journal.py report                              # 勝率/平均R/PF，依級別拆分；未滿20筆會提醒不要改規則
+```
+"未做的報單"也要記，才能算出「錯過」到底是規則問題還是執行問題。
 
 ## 4. 怎麼判斷 v2 是否真的比 v1 好
 `python3 backtest.py --days 120 --top 150`（同一份數據、同樣手續費 0.05% + 滑價 0.1%/邊）會輸出：
