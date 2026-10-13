@@ -26,6 +26,15 @@ def card(c, equity, r_pct, size, heat):
             f"出場：3 根內收回 {c.level:.6g} 下方→市價出；12 根沒走出 +0.5R→出")
 
 
+def blowoff(d):
+    """Blow-off top on the latest closed bar (short WATCHLIST only - no trade card). Same definition as analyze_short.py type A."""
+    r = d.iloc[-1]; rng = r.high - r.low
+    if rng <= 0 or any(pd.isna(r[x]) for x in ("mult", "ret7d", "qv24")): return None
+    wick = (r.high - max(r.open, r.close)) / rng
+    if r.mult >= 5 and r.ret7d >= 0.6 and r.qv24 >= 20e6 and wick >= 0.5 and r.close < r.open:
+        return dict(close=r.close, high=r.high, ret7d=r.ret7d, mult=r.mult, wick=wick, qv24=r.qv24)
+
+
 def push(msg):
     tok, chat = os.getenv("TG_TOKEN"), os.getenv("TG_CHAT")
     if tok and chat:
@@ -77,13 +86,21 @@ def main():
             if why: rows.append([str(t_now), s, "DONT", c.tier, why]); continue
             cards.append((c.mult, c, card(c, a.equity, a.r_pct, 0.5, heat)))
             rows.append([str(t_now), s, "DO", c.tier, ""])
+    watch = []
+    for s, d in data.items():
+        if d.index[-1] + bt.H1 != t_now: continue
+        w = blowoff(d)
+        if w:
+            watch.append(f"👀 觀察(做空，不發卡) {s}：7日 +{w['ret7d']:.0%} · 量 {w['mult']:.1f}x · 上影線 {w['wick']:.0%} · 收陰 · 高點 {w['high']:.6g} 收 {w['close']:.6g}")
+            rows.append([str(t_now), s, "WATCH_SHORT", "", "blow-off top"])
     cards.sort(key=lambda x: -x[0])
     keep = cards[:4]                                          # total open risk cap 2R at 0.5R each
     for _, c, _ in cards[4:]:
         rows.append([str(t_now), c.sym, "DONT", c.tier, "風險上限2R，已有更強的"])
-    msg = gtxt + "\n" + ("\n\n".join(x[2] for x in keep) if keep else ("本小時不發卡：" + why if why else "本小時無符合條件的訊號"))
+    body = "\n\n".join(x[2] for x in keep) if keep else ("本小時不發卡：" + why if why else "本小時無符合條件的訊號")
+    msg = gtxt + "\n" + body + ("\n\n" + "\n".join(watch) if watch else "")
     print(msg); log(rows)
-    if keep: push(msg)
+    if keep or watch: push(msg)
 
 
 if __name__ == "__main__":
