@@ -75,7 +75,7 @@ def fetch_klines(sym, days, cache="data"):
             r = http_json(f"https://www.okx.com/api/v5/market/history-candles?instId={sym}&bar=1H&limit=100&after={after}")["data"]
             if not r: break
             rows += [[int(x[0]), x[1], x[2], x[3], x[4], 0, 0, x[7]] for x in r if x[8] == "1"]
-            after = int(r[-1][0]); time.sleep(0.12)
+            after = int(r[-1][0]); time.sleep(0.9)
         rows = [x for x in rows if x[0] >= start][::-1]
         df = pd.DataFrame(rows).iloc[:, [0, 1, 2, 3, 4, 7]]
         df.columns = ["t", "open", "high", "low", "close", "qv"]
@@ -277,6 +277,27 @@ def size_v2(g, tier):
     return V2_TIER[tier] * (0.5 if g[0] == 1 else 1.0)
 
 
+def cands_v3(sym, d):
+    """v3: immediate entry at ignition close; quality tag from the 2 features that held up in analysis.py."""
+    out, last = [], -999
+    for j in events(d):
+        if j - last < 48: continue
+        L = d.hh48.iloc[j]; e = d.close.iloc[j]; a = d.atr.iloc[j]
+        if e / L - 1 > 0.08: continue
+        stop = min(max(d.low.iloc[j], L - a), e * 0.98)
+        if e / stop - 1 > 0.08: continue
+        last = j
+        q = (L - d.ll48.iloc[j]) / d.ll48.iloc[j] <= 0.13 and d.ret7d.iloc[j] <= 0.12
+        out.append(Cand(sym, j, j, d.index[j] + H1, e, L, stop, "Q" if q else "N", float(q), d.mult.iloc[j]))
+    return out
+
+
+HEAT_MIN = 6
+def size_v3(g, heat, tier, tilt):
+    if g is None or g[1] or g[0] < 3 or heat < HEAT_MIN: return 0.0   # BTC held >=3 closes above EMA20, no new-low, market not quiet
+    return 1.0 if (tilt and tier == "Q") else 0.5
+
+
 # ----------------------------------------------------------------------------- trade simulation
 @dataclass
 class Params:
@@ -333,12 +354,18 @@ def simulate(d, c, P):
 def run_strategy(name, data, gate, r_pct):
     P = P_V1 if name == "v1" else P_V2
     pre = {s: prep(d) for s, d in data.items()}
+    ev_t = np.sort(np.array([(d.index[j] + H1).value for d in pre.values() for j in events(d)], dtype="int64"))
+    day = pd.Timedelta("24h").value
     raw = []
     for s, d in pre.items():
-        cs = cands_v1(s, d) if name == "v1" else cands_v2(s, d)
+        cs = cands_v1(s, d) if name == "v1" else cands_v3(s, d) if name.startswith("v3") else cands_v2(s, d)
         for c in cs:
             g = gate.state(c.t)
-            c.base_size = size_v1(g) if name == "v1" else size_v2(g, c.tier)
+            if name.startswith("v3"):
+                heat = int(np.searchsorted(ev_t, c.t.value, "left") - np.searchsorted(ev_t, c.t.value - day, "left"))
+                c.base_size = size_v3(g, heat, c.tier, name == "v3tilt")
+            else:
+                c.base_size = size_v1(g) if name == "v1" else size_v2(g, c.tier)
             raw.append((c, d))
     sig_all = len(raw)
     live = sorted([x for x in raw if x[0].base_size > 0], key=lambda x: (x[0].t, -x[0].score))
@@ -414,7 +441,7 @@ def main():
         print(f"loaded {len(data)} symbols", flush=True)
     gate = BtcGate(btc)
     res = {}
-    for name in ("v1", "v2"):
+    for name in ("v1", "v2", "v3flat", "v3tilt"):
         trades, nsig, cands, pre = run_strategy(name, data, gate, a.r_pct)
         res[name] = trades
         h, w = recall(pre, cands)
@@ -424,6 +451,9 @@ def main():
             tmid = sorted(t.t0 for t in trades)[len(trades) // 2]
             print(fmt("first half", summarize([t for t in trades if t.t0 < tmid], a.r_pct)))
             print(fmt("second half (OOS)", summarize([t for t in trades if t.t0 >= tmid], a.r_pct)))
+        if name.startswith("v3"):
+            for tier in "QN":
+                print(fmt(f"tag {tier}", summarize([t for t in trades if t.tier == tier], a.r_pct)))
         if name == "v2":
             for tier in "ABC":
                 print(fmt(f"tier {tier}", summarize([t for t in trades if t.tier == tier], a.r_pct)))
