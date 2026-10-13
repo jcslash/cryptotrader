@@ -1,0 +1,5 @@
+data/
+data_live/
+signals.csv
+scan.log
+__pycache__/
