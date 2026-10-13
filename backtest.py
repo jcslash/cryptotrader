@@ -90,7 +90,7 @@ def fetch_klines(sym, days, cache="data"):
         start = r[-1][0] + 3600_000
         if len(r) < lim:
             break
-        time.sleep(0.25)
+        time.sleep(0.05)
     df = pd.DataFrame(rows).iloc[:, [0, 1, 2, 3, 4, 7]]
     df.columns = ["t", "open", "high", "low", "close", "qv"]
     df = df.iloc[:-1]  # drop the still-forming bar
@@ -403,10 +403,15 @@ def main():
         btcsym = "BTC-USDT-SWAP" if SOURCE == "okx" else "BTCUSDT"
         btc = fetch_klines(btcsym, a.days)
         data = {}
-        for s in universe(top=a.top):
-            if s != btcsym:
-                try: data[s] = fetch_klines(s, a.days)
-                except Exception as ex: print("skip", s, ex, file=sys.stderr)
+        from concurrent.futures import ThreadPoolExecutor
+        syms = [s for s in universe(top=a.top) if s != btcsym]
+        def one(s):
+            try: return s, fetch_klines(s, a.days)
+            except Exception as ex: print("skip", s, ex, file=sys.stderr); return s, None
+        with ThreadPoolExecutor(8) as ex:
+            for s, d in ex.map(one, syms):
+                if d is not None and len(d) > 300: data[s] = d
+        print(f"loaded {len(data)} symbols", flush=True)
     gate = BtcGate(btc)
     res = {}
     for name in ("v1", "v2"):
