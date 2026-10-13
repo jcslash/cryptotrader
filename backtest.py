@@ -15,6 +15,10 @@ import numpy as np
 import pandas as pd
 
 FAPI = "https://fapi.binance.com"
+SPOT = "https://data-api.binance.vision"
+SOURCE = "perp"   # perp | spot | okx
+QV_SCALE = 1.0    # spot volume understates perp volume; multiply to approximate (assumption, see README)
+STABLE = {"USDC","FDUSD","TUSD","USDP","DAI","BUSD","USDE","EUR","EURI","AEUR","USD1","XUSD","PYUSD","UST","USDT"}
 H1 = pd.Timedelta("1h")
 
 
@@ -22,7 +26,7 @@ H1 = pd.Timedelta("1h")
 def http_json(url, retries=4):
     for a in range(retries):
         try:
-            with urllib.request.urlopen(url, timeout=20) as r:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=20) as r:
                 return json.loads(r.read())
         except Exception:
             if a == retries - 1:
@@ -31,6 +35,22 @@ def http_json(url, retries=4):
 
 
 def universe(min_qv=20e6, top=None):
+    if SOURCE == "spot":
+        tk = http_json(f"{SPOT}/api/v3/ticker/24hr")
+        ok = []
+        for t in tk:
+            sy = t["symbol"]
+            if not sy.endswith("USDT"): continue
+            b = sy[:-4]
+            if b in STABLE or b.endswith(("UP", "DOWN", "BULL", "BEAR")): continue
+            ok.append((float(t["quoteVolume"]), sy))
+        ok = [sy for q, sy in sorted(ok, reverse=True) if q * QV_SCALE >= min_qv * 0.25]
+        return ok[:top] if top else ok
+    if SOURCE == "okx":
+        tk = http_json("https://www.okx.com/api/v5/market/tickers?instType=SWAP")["data"]
+        ok = [(float(t["volCcy24h"]) * float(t["last"]), t["instId"]) for t in tk if t["instId"].endswith("-USDT-SWAP")]
+        ok = [i for q, i in sorted(ok, reverse=True) if q >= min_qv * 0.25]
+        return ok[:top] if top else ok
     info = http_json(f"{FAPI}/fapi/v1/exchangeInfo")["symbols"]
     ok = {s["symbol"] for s in info if s["contractType"] == "PERPETUAL"
           and s["quoteAsset"] == "USDT" and s["status"] == "TRADING"}
@@ -43,19 +63,32 @@ def universe(min_qv=20e6, top=None):
 
 def fetch_klines(sym, days, cache="data"):
     os.makedirs(cache, exist_ok=True)
-    path = f"{cache}/{sym}_{days}d.csv"
+    path = f"{cache}/{SOURCE}_{sym}_{days}d.csv"
     if os.path.exists(path) and time.time() - os.path.getmtime(path) < 6 * 3600:
         return load_csv(path)
     end = int(time.time() * 1000)
     start = end - days * 86400_000
     rows = []
+    if SOURCE == "okx":
+        rows, after = [], end
+        while after > start:
+            r = http_json(f"https://www.okx.com/api/v5/market/history-candles?instId={sym}&bar=1H&limit=100&after={after}")["data"]
+            if not r: break
+            rows += [[int(x[0]), x[1], x[2], x[3], x[4], 0, 0, x[7]] for x in r if x[8] == "1"]
+            after = int(r[-1][0]); time.sleep(0.12)
+        rows = [x for x in rows if x[0] >= start][::-1]
+        df = pd.DataFrame(rows).iloc[:, [0, 1, 2, 3, 4, 7]]
+        df.columns = ["t", "open", "high", "low", "close", "qv"]
+        df.to_csv(path, index=False)
+        return load_csv(path)
+    base, ep, lim = (SPOT, "/api/v3/klines", 1000) if SOURCE == "spot" else (FAPI, "/fapi/v1/klines", 1500)
     while start < end:
-        r = http_json(f"{FAPI}/fapi/v1/klines?symbol={sym}&interval=1h&limit=1500&startTime={start}")
+        r = http_json(f"{base}{ep}?symbol={sym}&interval=1h&limit={lim}&startTime={start}")
         if not r:
             break
         rows += r
         start = r[-1][0] + 3600_000
-        if len(r) < 1500:
+        if len(r) < lim:
             break
         time.sleep(0.25)
     df = pd.DataFrame(rows).iloc[:, [0, 1, 2, 3, 4, 7]]
@@ -68,7 +101,9 @@ def fetch_klines(sym, days, cache="data"):
 def load_csv(path):
     df = pd.read_csv(path)
     df.index = pd.to_datetime(df.pop("t"), unit="ms", utc=True)
-    return df.astype(float)
+    df = df.astype(float)
+    df["qv"] *= QV_SCALE
+    return df
 
 
 def synthetic(n_sym=40, days=120, seed=7):
@@ -356,16 +391,20 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=120); ap.add_argument("--top", type=int)
     ap.add_argument("--synthetic", action="store_true")
+    ap.add_argument("--source", default="perp", choices=["perp", "spot", "okx"]); ap.add_argument("--qv-scale", type=float, default=1.0)
     ap.add_argument("--r-pct", type=float, default=0.01, help="1R as fraction of equity")
     a = ap.parse_args()
+    global SOURCE, QV_SCALE
+    SOURCE, QV_SCALE = a.source, a.qv_scale
     if a.synthetic:
         print("*** SYNTHETIC DATA: validates the engine only. Numbers say NOTHING about real markets. ***")
         btc, data = synthetic(days=a.days)
     else:
-        btc = fetch_klines("BTCUSDT", a.days)
+        btcsym = "BTC-USDT-SWAP" if SOURCE == "okx" else "BTCUSDT"
+        btc = fetch_klines(btcsym, a.days)
         data = {}
         for s in universe(top=a.top):
-            if s != "BTCUSDT":
+            if s != btcsym:
                 try: data[s] = fetch_klines(s, a.days)
                 except Exception as ex: print("skip", s, ex, file=sys.stderr)
     gate = BtcGate(btc)
