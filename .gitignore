@@ -4,3 +4,4 @@ signals.csv
 scan.log
 __pycache__/
 trades.csv
+data_*/
