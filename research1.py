@@ -11,7 +11,7 @@ def load():
         C[s], Q[s], TB[s] = k.close, k.qv, k.tbqv
         if f is not None: F[s] = f.last_funding_rate
     end = max(x.index.max() for x in C.values())
-    idx = pd.date_range("2023-01-01", end, freq="1h", tz="UTC")
+    idx = pd.date_range(pd.Timestamp("2023-01-01", tz="UTC"), end, freq="1h")
     mk = lambda d: pd.DataFrame(d).reindex(idx)
     close, qv, tb = mk(C), mk(Q), mk(TB)
     fund = pd.DataFrame(F).sort_index().reindex(idx.union(pd.DataFrame(F).index)).ffill().reindex(idx).reindex(columns=close.columns)
