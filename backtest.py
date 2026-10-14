@@ -153,7 +153,9 @@ def prep(d):
     return d
 
 
-def events(d, min_mult=5.0, min_qv24=20e6):
+QV24_MIN = 20e6
+def events(d, min_mult=5.0, min_qv24=None):
+    min_qv24 = QV24_MIN if min_qv24 is None else min_qv24
     m = (d.mult >= min_mult) & (d.close > d.hh48) & (d.qv24 >= min_qv24)
     return np.flatnonzero(m.fillna(False).to_numpy())
 
@@ -354,7 +356,7 @@ def simulate(d, c, P):
 def run_strategy(name, data, gate, r_pct):
     P = P_V1 if name == "v1" else P_V2
     pre = {s: prep(d) for s, d in data.items()}
-    ev_t = np.sort(np.array([(d.index[j] + H1).value for d in pre.values() for j in events(d)], dtype="int64"))
+    ev_t = np.sort(np.array([(d.index[j] + H1).value for d in pre.values() for j in events(d, min_qv24=20e6)], dtype="int64"))
     day = pd.Timedelta("24h").value
     raw = []
     for s, d in pre.items():
@@ -418,6 +420,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=120); ap.add_argument("--top", type=int)
     ap.add_argument("--synthetic", action="store_true")
+    ap.add_argument("--min-qv24", default="20", help="comma list in $M, e.g. 20,5"); ap.add_argument("--strategies", default="v1,v2,v3flat,v3tilt")
     ap.add_argument("--source", default="perp", choices=["perp", "spot", "okx"]); ap.add_argument("--qv-scale", type=float, default=1.0)
     ap.add_argument("--r-pct", type=float, default=0.01, help="1R as fraction of equity")
     a = ap.parse_args()
@@ -431,7 +434,7 @@ def main():
         btc = fetch_klines(btcsym, a.days)
         data = {}
         from concurrent.futures import ThreadPoolExecutor
-        syms = [s for s in universe(top=a.top) if s != btcsym]
+        syms = [s for s in universe(min_qv=4e6, top=a.top) if s != btcsym]
         def one(s):
             try: return s, fetch_klines(s, a.days)
             except Exception as ex: print("skip", s, ex, file=sys.stderr); return s, None
@@ -441,22 +444,26 @@ def main():
         print(f"loaded {len(data)} symbols", flush=True)
     gate = BtcGate(btc)
     res = {}
-    for name in ("v1", "v2", "v3flat", "v3tilt"):
-        trades, nsig, cands, pre = run_strategy(name, data, gate, a.r_pct)
-        res[name] = trades
-        h, w = recall(pre, cands)
-        print(f"\n===== {name} | raw signals {nsig} | winner-event recall {h}/{w} ({h / max(w, 1):.0%}) =====")
-        print(fmt("ALL", summarize(trades, a.r_pct)))
-        if trades:
-            tmid = sorted(t.t0 for t in trades)[len(trades) // 2]
-            print(fmt("first half", summarize([t for t in trades if t.t0 < tmid], a.r_pct)))
-            print(fmt("second half (OOS)", summarize([t for t in trades if t.t0 >= tmid], a.r_pct)))
-        if name.startswith("v3"):
-            for tier in "QN":
-                print(fmt(f"tag {tier}", summarize([t for t in trades if t.tier == tier], a.r_pct)))
-        if name == "v2":
-            for tier in "ABC":
-                print(fmt(f"tier {tier}", summarize([t for t in trades if t.tier == tier], a.r_pct)))
+    for qm in [float(x) * 1e6 for x in a.min_qv24.split(",")]:
+      global QV24_MIN
+      QV24_MIN = qm
+      print(f"\n########## entry liquidity threshold: 24h turnover >= ${qm / 1e6:.0f}M (scaled) ##########")
+      for name in a.strategies.split(","):
+          trades, nsig, cands, pre = run_strategy(name, data, gate, a.r_pct)
+          res[name] = trades
+          h, w = recall(pre, cands)
+          print(f"\n===== {name} | raw signals {nsig} | winner-event recall {h}/{w} ({h / max(w, 1):.0%}) =====")
+          print(fmt("ALL", summarize(trades, a.r_pct)))
+          if trades:
+              tmid = sorted(t.t0 for t in trades)[len(trades) // 2]
+              print(fmt("first half", summarize([t for t in trades if t.t0 < tmid], a.r_pct)))
+              print(fmt("second half (OOS)", summarize([t for t in trades if t.t0 >= tmid], a.r_pct)))
+          if name.startswith("v3"):
+              for tier in "QN":
+                  print(fmt(f"tag {tier}", summarize([t for t in trades if t.tier == tier], a.r_pct)))
+          if name == "v2":
+              for tier in "ABC":
+                  print(fmt(f"tier {tier}", summarize([t for t in trades if t.tier == tier], a.r_pct)))
     print("\nDecision rule: keep tier sizing only if avgR(A) > avgR(B) > avgR(C) on BOTH halves; else flatten sizes.")
 
 
